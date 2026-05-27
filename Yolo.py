@@ -229,6 +229,6 @@ st.markdown("""
     padding-left: 20px;
     padding-right: 20px;
 ">
-    Developed with ❤️ by <b>BLECA<sup style="color:#ff4b4b;">TM</sup></b>
+    Developed with  by <b>BLECA,SmartLabs<sup style="color:#ff4b4b;">TM</sup></b>
 </div>
 """, unsafe_allow_html=True)
