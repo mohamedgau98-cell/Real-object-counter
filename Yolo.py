@@ -64,6 +64,8 @@ if "detected_objects_list" not in st.session_state:
     st.session_state.detected_objects_list = []
 if "run_live_feed" not in st.session_state:
     st.session_state.run_live_feed = False
+if "processed_image" not in st.session_state:
+    st.session_state.processed_image = None
 
 # SIDE BAR - CONTROL PANEL #
 st.sidebar.header("⚙️ Control Panel")
@@ -87,6 +89,7 @@ if start_cam:
     st.session_state.run_live_feed = True
 if stop_cam:
     st.session_state.run_live_feed = False
+    st.session_state.detection_done = False
 
 # Layout Setup
 col1, col2, col3 = st.columns(3, gap="large")
@@ -132,58 +135,48 @@ if file_uploaded and run and not st.session_state.run_live_feed:
 with col2:
     if st.session_state.run_live_feed:
         st.markdown("### 🎥 Real-Time Stream")
-        model = YOLO(f"{model_choice}.pt")
         
-        cap = cv2.VideoCapture(0)  # Change index to 1 if using an external webcam
+        # Hii ndio inayosuluhisha tatizo la Samsung/Platform zote kupitia Kivinjari
+        mobile_camera = st.camera_input("Capture frame from device camera")
         
-        if not cap.isOpened():
-            st.error("🚨 Failed to initialize camera hardware interface!")
-            st.session_state.run_live_feed = False
-        else:
-            frame_placeholder = st.empty()
+        if mobile_camera:
+            model = YOLO(f"{model_choice}.pt")
+            img_raw = Image.open(mobile_camera)
+            img_array = np.array(img_raw)
             
-            # Re-establishing placeholders in col3 to stream content without layout shifts
+            result = model(img_array, conf=confidence/100, max_det=max_det)
+            annotated_frame = result[0].plot()
+            
+            names_dict = result[0].names
+            current_names = [names_dict[int(box.cls[0])] for box in result[0].boxes]
+            
+            st.session_state.object_count = len(result[0].boxes)
+            st.session_state.detected_objects_list = list(set(current_names))
+            st.session_state.source_type = "Real-Time Camera Detection"
+            st.session_state.processed_image = annotated_frame
+            st.session_state.detection_done = True
+            
+            # Inaonyesha picha iliyochambuliwa papo hapo
+            st.image(st.session_state.processed_image, caption="Processed Live Frame", use_container_width=True)
+            
+            # Kusukuma majibu kwenda col3 kiotomatiki bila kupoteza mpangilio
             with col3:
                 st.markdown("### 📊 Analysis & Output")
-                metric_placeholder = st.empty()
-                st.markdown("---")
-                st.write("#### 🏷️ Detected Object Names:")
-                names_placeholder = st.empty()
-            
-            while st.session_state.run_live_feed:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                result = model(frame, conf=confidence/100, max_det=max_det)
-                annotated_frame = result[0].plot()
-                
-                rgb_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                frame_placeholder.image(rgb_frame, channels="RGB", use_container_width=True)
-                
-                names_dict = result[0].names
-                current_names = [names_dict[int(box.cls[0])] for box in result[0].boxes]
-                
-                st.session_state.object_count = len(result[0].boxes)
-                st.session_state.detected_objects_list = list(set(current_names))
-                
-                # Render beautifully styled card updates on live feed
-                metric_placeholder.markdown(f"""
+                st.markdown(f"""
                 <div class="metric-card">
                     <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
                     <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{st.session_state.object_count}</h2>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                with names_placeholder.container():
-                    if st.session_state.detected_objects_list:
-                        for obj in st.session_state.detected_objects_list:
-                            st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
-                    else:
-                        st.write("*No items found in frame.*")
+                st.markdown("---")
+                st.write("#### 🏷️ Detected Object Names:")
+                if st.session_state.detected_objects_list:
+                    for obj in st.session_state.detected_objects_list:
+                        st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
+                else:
+                    st.write("*No items found in frame.*")
                         
-            cap.release()
-            
     elif st.session_state.detection_done and not st.session_state.run_live_feed:
         st.markdown(f"### 🖼️ {st.session_state.source_type}")
         st.image(st.session_state.processed_image, caption="Visual View Analysis", use_container_width=True)
@@ -228,6 +221,7 @@ st.markdown("""
     margin: 20px auto 0 auto;
     padding-left: 20px;
     padding-right: 20px;
+ Red
 ">
     Developed with  by <b>BLECA,SmartLabs<sup style="color:#ff4b4b;">TM</sup></b>
 </div>
