@@ -3,7 +3,7 @@ import cv2
 import streamlit as st
 from PIL import Image
 import numpy as np
-from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode, VideoProcessorBase
 import av
 
 # Page configuration
@@ -71,7 +71,9 @@ if "run_live_feed" not in st.session_state:
 st.sidebar.header("⚙️ Control Panel")
 model_choice = st.sidebar.selectbox("Choose Model", ["yolov8n", "yolov8s", "yolov8m"])
 file_uploaded = st.sidebar.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
-confidence = st.sidebar.slider("Confidence Threshold", 0, 100, 25)
+
+# Hint to user for far objects: lower confidence helps detect distant small frames
+confidence = st.sidebar.slider("Confidence Threshold (Lower this for distant objects)", 0, 100, 20)
 max_det = st.sidebar.selectbox("Max Detections", [5, 10, 20])
 
 # Styling the Run Button
@@ -118,8 +120,16 @@ if file_uploaded and run and not st.session_state.run_live_feed:
     image = Image.open(file_uploaded)
     img_array = np.array(image)
     
-    result = model(img_array, conf=confidence/100, max_det=max_det)
+    # Static Image Zoom Pipeline for far object scaling
+    h, w = img_array.shape[:2]
+    img_resized = cv2.resize(img_array, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC) if w < 1000 else img_array
+    
+    result = model(img_resized, conf=confidence/100, max_det=max_det)
     annotated_image = result[0].plot()
+    
+    # Scale back down for standard display view consistency
+    if w < 1000:
+        annotated_image = cv2.resize(annotated_image, (w, h), interpolation=cv2.INTER_AREA)
     
     names_dict = result[0].names
     found_names = [names_dict[int(box.cls[0])] for box in result[0].boxes]
@@ -141,52 +151,47 @@ with col2:
         
         model = load_yolo_model(model_choice)
 
-        # Setup dynamic display placeholders for Column 3 before starting the stream
-        with col3:
-            st.markdown("### 📊 Analysis & Output")
-            metric_placeholder = st.empty()
-            st.markdown("---")
-            st.write("#### 🏷️ Detected Object Names:")
-            names_placeholder = st.empty()
+        # Class based video processor with Auto-Scaling for distant objects
+        class YOLOProcessor(VideoProcessorBase):
+            def __init__(self):
+                self.count = 0
+                self.current_names = []
 
-        # Streamlit-webrtc frame callback handler
-        def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-            img = frame.to_ndarray(format="bgr24")
-            
-            # Object detection
-            result = model(img, conf=confidence/100, max_det=max_det)
-            annotated_frame = result[0].plot()
-            
-            # Fetch output telemetry data
-            names_dict = result[0].names
-            current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
-            count = len(result[0].boxes)
-            
-            # Dynamically push code injection to elements inside Column 3 via WebRTC thread
-            metric_placeholder.markdown(f"""
-            <div class="metric-card">
-                <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
-                <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{count}</h2>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            cards_html = ""
-            if current_names:
-                for obj in current_names:
-                    cards_html += f'<div class="name-card">🔹 {obj.upper()}</div>'
-            else:
-                cards_html = "<i>No items found in frame.</i>"
+            def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+                img = frame.to_ndarray(format="bgr24")
                 
-            names_placeholder.markdown(cards_html, unsafe_allow_html=True)
+                # Dynamic Frame Scaling Pipeline to enhance far/small objects feature extraction
+                h, w = img.shape[:2]
+                scaled_img = cv2.resize(img, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
                 
-            return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
+                result = model(scaled_img, conf=confidence/100, max_det=max_det)
+                annotated_frame = result[0].plot()
+                
+                # Downscale back to original aspect ratio for presentation window
+                final_frame = cv2.resize(annotated_frame, (w, h), interpolation=cv2.INTER_AREA)
+                
+                names_dict = result[0].names
+                self.current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
+                self.count = len(result[0].boxes)
+                
+                return av.VideoFrame.from_ndarray(final_frame, format="bgr24")
 
-        # Start the video streaming component without main thread disruption
+        # Robust multi-server STUN/TURN configurations to bypass carrier grade firewalls/NATs
+        ice_servers_config = [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302"]},
+            {"urls": ["stun:stun3.l.google.com:19302"]},
+            {"urls": ["stun:stun4.l.google.com:19302"]},
+            {"urls": ["stun:global.stun.twilio.com:3478"]}
+        ]
+
+        # Start WebRTC Streamer with powerful bypass configurations
         webrtc_ctx = webrtc_streamer(
             key="yolo-detection",
             mode=WebRtcMode.SENDRECV,
-            rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
-            video_frame_callback=video_frame_callback,
+            rtc_configuration=RTCConfiguration({"iceServers": ice_servers_config}),
+            video_processor_factory=YOLOProcessor,
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True
         )
@@ -198,27 +203,46 @@ with col2:
         st.markdown("### 🖼️ Detection View Window")
         st.info("System idle. Activate an operational mode via the control panel.")
 
-# COLUMN 3: Data Telemetry Dashboard Display (Static Mode Only)
+# COLUMN 3: Data Telemetry Dashboard Display (Static & Live support)
 with col3:
-    if not st.session_state.run_live_feed:
-        st.markdown("### 📊 Analysis & Output")
-        if st.session_state.detection_done:
-            st.markdown(f"""
-            <div class="metric-card">
-                <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
-                <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{st.session_state.object_count}</h2>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            st.write("#### 🏷️ Detected Object Names:")
-            if st.session_state.detected_objects_list:
-                for obj in st.session_state.detected_objects_list:
-                    st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
-            else:
-                st.write("*No items found.*")
+    st.markdown("### 📊 Analysis & Output")
+    
+    if st.session_state.run_live_feed and webrtc_ctx.video_processor:
+        live_count = webrtc_ctx.video_processor.count
+        live_items = webrtc_ctx.video_processor.current_names
+        
+        st.markdown(f"""
+        <div class="metric-card">
+            <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
+            <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{live_count}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        st.write("#### 🏷️ Detected Object Names:")
+        if live_items:
+            for obj in live_items:
+                st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
         else:
-            st.warning("No live data streaming. Awaiting analytical pipeline activation.")
+            st.write("*No items found in frame.*")
+            
+    elif not st.session_state.run_live_feed and st.session_state.detection_done:
+        st.markdown(f"""
+        <div class="metric-card">
+            <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
+            <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{st.session_state.object_count}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        st.write("#### 🏷️ Detected Object Names:")
+        if st.session_state.detected_objects_list:
+            for obj in st.session_state.detected_objects_list:
+                st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
+        else:
+            st.write("*No items found.*")
+    else:
+        st.warning("No live data streaming. Awaiting analytical pipeline activation.")
 
 # Modern Footer Layout
 st.markdown("""
@@ -235,6 +259,6 @@ st.markdown("""
     padding-left: 20px;
     padding-right: 20px;
 ">
-    Developed with ❤️ by <b>BLECA<sup style="color:#ff4b4b;">TM</sup></b>
+    Developed by <b>BLECA,SmartLabs<sup style="color:#ff4b4b;">TM</sup></b>
 </div>
 """, unsafe_allow_html=True)
