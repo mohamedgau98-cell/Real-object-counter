@@ -3,6 +3,7 @@ import cv2
 import streamlit as st
 from PIL import Image
 import numpy as np
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration, WebRtcMode
 
 # Page configuration
 st.set_page_config(page_title="AI Object Detector", page_icon="🤖", layout="wide")
@@ -64,8 +65,6 @@ if "detected_objects_list" not in st.session_state:
     st.session_state.detected_objects_list = []
 if "run_live_feed" not in st.session_state:
     st.session_state.run_live_feed = False
-if "processed_image" not in st.session_state:
-    st.session_state.processed_image = None
 
 # SIDE BAR - CONTROL PANEL #
 st.sidebar.header("⚙️ Control Panel")
@@ -89,7 +88,6 @@ if start_cam:
     st.session_state.run_live_feed = True
 if stop_cam:
     st.session_state.run_live_feed = False
-    st.session_state.detection_done = False
 
 # Layout Setup
 col1, col2, col3 = st.columns(3, gap="large")
@@ -135,48 +133,60 @@ if file_uploaded and run and not st.session_state.run_live_feed:
 with col2:
     if st.session_state.run_live_feed:
         st.markdown("### 🎥 Real-Time Stream")
+        model = YOLO(f"{model_choice}.pt")
         
-        # Hii ndio inayosuluhisha tatizo la Samsung/Platform zote kupitia Kivinjari
-        mobile_camera = st.camera_input("Capture frame from device camera")
-        
-        if mobile_camera:
-            model = YOLO(f"{model_choice}.pt")
-            img_raw = Image.open(mobile_camera)
-            img_array = np.array(img_raw)
-            
-            result = model(img_array, conf=confidence/100, max_det=max_det)
-            annotated_frame = result[0].plot()
-            
-            names_dict = result[0].names
-            current_names = [names_dict[int(box.cls[0])] for box in result[0].boxes]
-            
-            st.session_state.object_count = len(result[0].boxes)
-            st.session_state.detected_objects_list = list(set(current_names))
-            st.session_state.source_type = "Real-Time Camera Detection"
-            st.session_state.processed_image = annotated_frame
-            st.session_state.detection_done = True
-            
-            # Inaonyesha picha iliyochambuliwa papo hapo
-            st.image(st.session_state.processed_image, caption="Processed Live Frame", use_container_width=True)
-            
-            # Kusukuma majibu kwenda col3 kiotomatiki bila kupoteza mpangilio
-            with col3:
-                st.markdown("### 📊 Analysis & Output")
-                st.markdown(f"""
+        # Re-establishing placeholders in col3 to stream content without layout shifts
+        with col3:
+            st.markdown("### 📊 Analysis & Output")
+            metric_placeholder = st.empty()
+            st.markdown("---")
+            st.write("#### 🏷️ Detected Object Names:")
+            names_placeholder = st.empty()
+
+        # WebRTC Video Transformer for cross-platform browser video stream support
+        class YOLOVideoTransformer(VideoTransformerBase):
+            def transform(self, frame):
+                img = frame.to_ndarray(format="bgr24")
+                
+                # Run YOLO prediction
+                result = model(img, conf=confidence/100, max_det=max_det)
+                annotated_frame = result[0].plot()
+                
+                # Process classes and count
+                names_dict = result[0].names
+                current_names = [names_dict[int(box.cls[0])] for box in result[0].boxes]
+                
+                # Update Streamlit main thread session state and elements safely
+                st.session_state.object_count = len(result[0].boxes)
+                st.session_state.detected_objects_list = list(set(current_names))
+                
+                # Render beautifully styled card updates on live feed
+                metric_placeholder.markdown(f"""
                 <div class="metric-card">
                     <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
                     <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{st.session_state.object_count}</h2>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.markdown("---")
-                st.write("#### 🏷️ Detected Object Names:")
-                if st.session_state.detected_objects_list:
-                    for obj in st.session_state.detected_objects_list:
-                        st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
-                else:
-                    st.write("*No items found in frame.*")
+                with names_placeholder.container():
+                    if st.session_state.detected_objects_list:
+                        for obj in st.session_state.detected_objects_list:
+                            st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
+                    else:
+                        st.write("*No items found in frame.*")
                         
+                return frame.from_ndarray(annotated_frame, format="bgr24")
+
+        # Context configurations for STUN servers to bypass NAT/Firewalls on Mobile and Cloud Platforms
+        webrtc_ctx = webrtc_streamer(
+            key="yolo-detection",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
+            video_processor_factory=YOLOVideoTransformer,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True
+        )
+        
     elif st.session_state.detection_done and not st.session_state.run_live_feed:
         st.markdown(f"### 🖼️ {st.session_state.source_type}")
         st.image(st.session_state.processed_image, caption="Visual View Analysis", use_container_width=True)
@@ -221,8 +231,7 @@ st.markdown("""
     margin: 20px auto 0 auto;
     padding-left: 20px;
     padding-right: 20px;
- Red
 ">
-    Developed with  by <b>BLECA,SmartLabs<sup style="color:#ff4b4b;">TM</sup></b>
+    Developed with ❤️ by <b>BLECA<sup style="color:#ff4b4b;">TM</sup></b>
 </div>
 """, unsafe_allow_html=True)
