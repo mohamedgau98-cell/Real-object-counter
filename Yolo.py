@@ -5,7 +5,6 @@ from PIL import Image
 import numpy as np
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 import av
-import threading
 
 # Page configuration
 st.set_page_config(page_title="AI Object Detector", page_icon="🤖", layout="wide")
@@ -56,12 +55,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- LOCK & CACHE FOR THREAD-SAFE COUNTER ---
-# This prevents different worker threads from clashing and breaking Streamlit session state
-lock = threading.Lock()
-if "live_counts" not in st.session_state:
-    st.session_state.live_counts = {"count": 0, "items": []}
-
+# --- SESSION STATE MANAGEMENT ---
 if "object_count" not in st.session_state:
     st.session_state.object_count = 0
 if "detection_done" not in st.session_state:
@@ -141,33 +135,53 @@ with col2:
     if st.session_state.run_live_feed:
         st.markdown("### 🎥 Real-Time Stream")
         
-        # Load model using Streamlit cache so it doesn't reload every frame
         @st.cache_resource
         def load_yolo_model(model_name):
             return YOLO(f"{model_name}.pt")
         
         model = load_yolo_model(model_choice)
 
-        # Thread-safe Frame Processor
+        # Setup dynamic display placeholders for Column 3 before starting the stream
+        with col3:
+            st.markdown("### 📊 Analysis & Output")
+            metric_placeholder = st.empty()
+            st.markdown("---")
+            st.write("#### 🏷️ Detected Object Names:")
+            names_placeholder = st.empty()
+
+        # Streamlit-webrtc frame callback handler
         def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
             img = frame.to_ndarray(format="bgr24")
             
-            # Predict
+            # Object detection
             result = model(img, conf=confidence/100, max_det=max_det)
             annotated_frame = result[0].plot()
             
+            # Fetch output telemetry data
             names_dict = result[0].names
             current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
             count = len(result[0].boxes)
             
-            # Safely write to global state without invoking Streamlit UI render loops inside the thread
-            with lock:
-                st.session_state.live_counts["count"] = count
-                st.session_state.live_counts["items"] = current_names
+            # Dynamically push code injection to elements inside Column 3 via WebRTC thread
+            metric_placeholder.markdown(f"""
+            <div class="metric-card">
+                <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
+                <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{count}</h2>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            cards_html = ""
+            if current_names:
+                for obj in current_names:
+                    cards_html += f'<div class="name-card">🔹 {obj.upper()}</div>'
+            else:
+                cards_html = "<i>No items found in frame.</i>"
+                
+            names_placeholder.markdown(cards_html, unsafe_allow_html=True)
                 
             return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
 
-        # Stable stream initialization
+        # Start the video streaming component without main thread disruption
         webrtc_ctx = webrtc_streamer(
             key="yolo-detection",
             mode=WebRtcMode.SENDRECV,
@@ -184,51 +198,27 @@ with col2:
         st.markdown("### 🖼️ Detection View Window")
         st.info("System idle. Activate an operational mode via the control panel.")
 
-# COLUMN 3: Data Telemetry Dashboard Display (Dynamic rendering for both live and static)
+# COLUMN 3: Data Telemetry Dashboard Display (Static Mode Only)
 with col3:
-    st.markdown("### 📊 Analysis & Output")
-    if st.session_state.run_live_feed:
-        # Constantly pull from the locked background thread values to render UI in main thread safely
-        with lock:
-            live_count = st.session_state.live_counts["count"]
-            live_items = st.session_state.live_counts["items"]
+    if not st.session_state.run_live_feed:
+        st.markdown("### 📊 Analysis & Output")
+        if st.session_state.detection_done:
+            st.markdown(f"""
+            <div class="metric-card">
+                <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
+                <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{st.session_state.object_count}</h2>
+            </div>
+            """, unsafe_allow_html=True)
             
-        st.markdown(f"""
-        <div class="metric-card">
-            <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
-            <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{live_count}</h2>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.write("#### 🏷️ Detected Object Names:")
-        if live_items:
-            for obj in live_items:
-                st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
+            st.markdown("---")
+            st.write("#### 🏷️ Detected Object Names:")
+            if st.session_state.detected_objects_list:
+                for obj in st.session_state.detected_objects_list:
+                    st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
+            else:
+                st.write("*No items found.*")
         else:
-            st.write("*No items found in frame.*")
-            
-        # Forces a clean UI update loop for telemetry data while video is active
-        st.rerun()
-            
-    elif st.session_state.detection_done:
-        # Styled Static Card
-        st.markdown(f"""
-        <div class="metric-card">
-            <p style="color: #666; margin: 0; font-size: 0.9rem; text-transform: uppercase;">Total Objects Counted</p>
-            <h2 style="color: #1e3c72; margin: 5px 0 0 0; font-size: 2.5rem;">{st.session_state.object_count}</h2>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.write("#### 🏷️ Detected Object Names:")
-        if st.session_state.detected_objects_list:
-            for obj in st.session_state.detected_objects_list:
-                st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
-        else:
-            st.write("*No items found.*")
-    else:
-        st.warning("No live data streaming. Awaiting analytical pipeline activation.")
+            st.warning("No live data streaming. Awaiting analytical pipeline activation.")
 
 # Modern Footer Layout
 st.markdown("""
@@ -245,6 +235,6 @@ st.markdown("""
     padding-left: 20px;
     padding-right: 20px;
 ">
-    Developed with  by <b>BLECA,SmartLabs<sup style="color:#ff4b4b;">TM</sup></b>
+    Developed with ❤️ by <b>BLECA<sup style="color:#ff4b4b;">TM</sup></b>
 </div>
 """, unsafe_allow_html=True)
