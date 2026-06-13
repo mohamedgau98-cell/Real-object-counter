@@ -195,7 +195,6 @@ with col2:
 with col3:
     st.markdown("### 📊 Analysis & Output")
     
-    # MABADILIKO MAKUBWA: Hapa sasa tunavuta data kutoka kwa muktadha wa video inayocheza moja kwa moja
     if st.session_state.run_live_feed:
         live_count = 0
         live_items = []
@@ -219,7 +218,6 @@ with col3:
         else:
             st.write("*No items found in frame.*")
             
-        # Kitufe hiki kipo ili kusaidia kulazimisha Streamlit kusoma namba upya video inapoendelea
         st.button("🔄 Click to Refresh Counter")
             
     elif not st.session_state.run_live_feed and st.session_state.detection_done:
