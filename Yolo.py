@@ -207,7 +207,8 @@ with col2:
 with col3:
     st.markdown("### 📊 Analysis & Output")
     
-    if st.session_state.run_live_feed and webrtc_ctx.video_processor:
+    # MABORESHO: Tumeongeza ukaguzi kuhakikisha video_processor ipo tayari (is not None) kabla ya kusoma data
+    if st.session_state.run_live_feed and webrtc_ctx and webrtc_ctx.video_processor is not None:
         live_count = webrtc_ctx.video_processor.count
         live_items = webrtc_ctx.video_processor.current_names
         
@@ -225,6 +226,9 @@ with col3:
                 st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
         else:
             st.write("*No items found in frame.*")
+            
+    elif st.session_state.run_live_feed and (webrtc_ctx is None or webrtc_ctx.video_processor is None):
+        st.warning("🎥 Kamera inaunganishwa... Tafadhali ruhusu (Allow) matumizi ya Kamera kwenye Browser yako.")
             
     elif not st.session_state.run_live_feed and st.session_state.detection_done:
         st.markdown(f"""
