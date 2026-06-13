@@ -5,9 +5,14 @@ from PIL import Image
 import numpy as np
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode, VideoProcessorBase
 import av
+import threading
 
 # Page configuration
 st.set_page_config(page_title="AI Object Detector", page_icon="🤖", layout="wide")
+
+# Muundo wa Kushare Data Salama Kati ya Video Thread na Streamlit UI Thread
+lock = threading.Lock()
+track_data = {"count": 0, "names": []}
 
 # Modern and Professional Header Styling
 st.markdown("""
@@ -67,23 +72,27 @@ if "detected_objects_list" not in st.session_state:
 if "run_live_feed" not in st.session_state:
     st.session_state.run_live_feed = False
 
+# --- UTILITY TO LOAD MODEL SAFELY ---
+@st.cache_resource
+def load_yolo_model(model_name):
+    return YOLO(f"{model_name}.pt")
+
+# Pakia mfano mmoja tu wa model kulingana na chaguo la mtumiaji (RAM Efficiency)
+model = load_yolo_model(model_choice := st.sidebar.selectbox("Choose Model", ["yolov8n", "yolov8s", "yolov8m"]))
+
 # SIDE BAR - CONTROL PANEL #
 st.sidebar.header("⚙️ Control Panel")
-model_choice = st.sidebar.selectbox("Choose Model", ["yolov8n", "yolov8s", "yolov8m"])
 file_uploaded = st.sidebar.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
 
-# Hint to user for far objects: lower confidence helps detect distant small frames
 confidence = st.sidebar.slider("Confidence Threshold (Lower this for distant objects)", 0, 100, 20)
 max_det = st.sidebar.selectbox("Max Detections", [5, 10, 20])
 
-# Styling the Run Button
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 run = st.sidebar.button("▶️ Run Image Detection")
 
 st.sidebar.markdown("---")
 st.sidebar.write("### 🎥 Camera Controls")
 
-# Styled Start and Stop buttons directly under each other
 start_cam = st.sidebar.button("📸 Start Live Camera & Count")
 stop_cam = st.sidebar.button("🛑 Stop Live Camera Feed")
 
@@ -116,7 +125,6 @@ with col1:
 
 # --- STATIC IMAGE DETECTION LOGIC ---
 if file_uploaded and run and not st.session_state.run_live_feed:
-    model = YOLO(f"{model_choice}.pt")
     image = Image.open(file_uploaded)
     img_array = np.array(image)
     
@@ -127,7 +135,6 @@ if file_uploaded and run and not st.session_state.run_live_feed:
     result = model(img_resized, conf=confidence/100, max_det=max_det)
     annotated_image = result[0].plot()
     
-    # Scale back down for standard display view consistency
     if w < 1000:
         annotated_image = cv2.resize(annotated_image, (w, h), interpolation=cv2.INTER_AREA)
     
@@ -144,39 +151,33 @@ if file_uploaded and run and not st.session_state.run_live_feed:
 with col2:
     if st.session_state.run_live_feed:
         st.markdown("### 🎥 Real-Time Stream")
-        
-        @st.cache_resource
-        def load_yolo_model(model_name):
-            return YOLO(f"{model_name}.pt")
-        
-        model = load_yolo_model(model_choice)
 
-        # Class based video processor with Auto-Scaling for distant objects
+        # Class-based video processor iliyosafishwa kuzuia app ku-crash au kuchelewa kusoma picha
         class YOLOProcessor(VideoProcessorBase):
-            def __init__(self):
-                self.count = 0
-                self.current_names = []
-
             def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
                 img = frame.to_ndarray(format="bgr24")
                 
-                # Dynamic Frame Scaling Pipeline to enhance far/small objects feature extraction
+                # Dynamic Frame Scaling Pipeline to enhance far/small objects
                 h, w = img.shape[:2]
                 scaled_img = cv2.resize(img, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
                 
                 result = model(scaled_img, conf=confidence/100, max_det=max_det)
                 annotated_frame = result[0].plot()
                 
-                # Downscale back to original aspect ratio for presentation window
                 final_frame = cv2.resize(annotated_frame, (w, h), interpolation=cv2.INTER_AREA)
                 
                 names_dict = result[0].names
-                self.current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
-                self.count = len(result[0].boxes)
+                current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
+                count = len(result[0].boxes)
+                
+                # Hifadhi taarifa kwa usalama kwenye lock ili UI isisababishe kosa la ufungaji (race condition)
+                with lock:
+                    track_data["count"] = count
+                    track_data["names"] = current_names
                 
                 return av.VideoFrame.from_ndarray(final_frame, format="bgr24")
 
-        # Robust multi-server STUN/TURN configurations to bypass carrier grade firewalls/NATs
+        # Robust multi-server STUN/TURN configurations to bypass firewalls
         ice_servers_config = [
             {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": ["stun:stun1.l.google.com:19302"]},
@@ -186,7 +187,6 @@ with col2:
             {"urls": ["stun:global.stun.twilio.com:3478"]}
         ]
 
-        # Start WebRTC Streamer with powerful bypass configurations
         webrtc_ctx = webrtc_streamer(
             key="yolo-detection",
             mode=WebRtcMode.SENDRECV,
@@ -207,10 +207,11 @@ with col2:
 with col3:
     st.markdown("### 📊 Analysis & Output")
     
-    # MABORESHO: Tumeongeza ukaguzi kuhakikisha video_processor ipo tayari (is not None) kabla ya kusoma data
-    if st.session_state.run_live_feed and webrtc_ctx and webrtc_ctx.video_processor is not None:
-        live_count = webrtc_ctx.video_processor.count
-        live_items = webrtc_ctx.video_processor.current_names
+    if st.session_state.run_live_feed:
+        # Soma data kutoka kwenye uzi wa video (Thread-safe block)
+        with lock:
+            live_count = track_data["count"]
+            live_items = track_data["names"]
         
         st.markdown(f"""
         <div class="metric-card">
@@ -227,8 +228,9 @@ with col3:
         else:
             st.write("*No items found in frame.*")
             
-    elif st.session_state.run_live_feed and (webrtc_ctx is None or webrtc_ctx.video_processor is None):
-        st.warning("🎥 Kamera inaunganishwa... Tafadhali ruhusu (Allow) matumizi ya Kamera kwenye Browser yako.")
+        # Ongeza kitufe kidogo cha ku-refresh data za Live camera upande wa UI
+        if webrtc_ctx and webrtc_ctx.state.playing:
+            st.button("🔄 Refresh Data Summary")
             
     elif not st.session_state.run_live_feed and st.session_state.detection_done:
         st.markdown(f"""
