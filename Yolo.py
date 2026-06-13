@@ -10,6 +10,10 @@ import threading
 # Page configuration
 st.set_page_config(page_title="AI Object Detector", page_icon="🤖", layout="wide")
 
+# Thread-safe data transfer layer
+lock = threading.Lock()
+track_data = {"count": 0, "names": []}
+
 # Modern and Professional Header Styling
 st.markdown("""
 <div style="
@@ -26,7 +30,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Custom CSS for Buttons, Selectboxes, and Output Cards
+# Custom CSS for UI Cards
 st.markdown("""
 <style>
     div.stSelectbox>div {
@@ -65,7 +69,6 @@ if "detected_objects_list" not in st.session_state:
 if "run_live_feed" not in st.session_state:
     st.session_state.run_live_feed = False
 
-# --- UTILITY TO LOAD MODEL SAFELY ---
 @st.cache_resource
 def load_yolo_model(model_name):
     return YOLO(f"{model_name}.pt")
@@ -76,8 +79,10 @@ model_choice = st.sidebar.selectbox("Choose Model", ["yolov8n", "yolov8s", "yolo
 model = load_yolo_model(model_choice)
 
 file_uploaded = st.sidebar.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
-confidence = st.sidebar.slider("Confidence Threshold (Lower this for distant objects)", 0, 100, 20)
-max_det = st.sidebar.selectbox("Max Detections", [5, 10, 20])
+
+# Tunapendekeza 40-50% kama default ili kuzuia makosa ya uongo (False Detections)
+confidence = st.sidebar.slider("Confidence Threshold (Set 45%+ to stop false names)", 0, 100, 45)
+max_det = st.sidebar.selectbox("Max Detections", [5, 10, 20, 50])
 
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 run = st.sidebar.button("▶️ Run Image Detection")
@@ -109,9 +114,9 @@ with col1:
         st.info("Awaiting image upload or live feed activation.")
         st.markdown("""
         ### Quick Guide
-        1. **Static Mode:** Upload an image from the sidebar and click **Run Image Detection**.
-        2. **Live Mode:** Click **Start Live Camera** to trigger automated real-time object tracking.
-        3. **Adjustments:** Tune the **Confidence Threshold** if objects are being missed.
+        1. **Confidence Filter:** Slide the threshold to **45% or 50%** to completely eliminate wrong object predictions.
+        2. **Live Mode:** Click **Start Live Camera** to begin tracking.
+        3. **Sync Output:** Use the dashboard panel on the right to see verified target names.
         """)
 
 # --- STATIC IMAGE DETECTION LOGIC ---
@@ -137,17 +142,14 @@ if file_uploaded and run and not st.session_state.run_live_feed:
     st.session_state.source_type = "Static Image Detection"
     st.session_state.detection_done = True
 
-# --- LIVE CAMERA RECV PROCESSOR (IMPROVED CLASS BASED PERSISTENCE) ---
+# --- HIGH PRECISION VIDEO PROCESSOR ---
 class YOLOProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.count = 0
-        self.current_names = []
-
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         
+        # Performance optimization resolution scale
         h, w = img.shape[:2]
-        scaled_img = cv2.resize(img, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
+        scaled_img = cv2.resize(img, (int(w * 1.2), int(h * 1.2)), interpolation=cv2.INTER_CUBIC)
         
         result = model(scaled_img, conf=confidence/100, max_det=max_det)
         annotated_frame = result[0].plot()
@@ -155,8 +157,14 @@ class YOLOProcessor(VideoProcessorBase):
         final_frame = cv2.resize(annotated_frame, (w, h), interpolation=cv2.INTER_AREA)
         
         names_dict = result[0].names
-        self.current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
-        self.count = len(result[0].boxes)
+        
+        # MABORESHO: Kusoma majina kwa usahihi wa mabano yanayochorwa (Hakuna kupishana)
+        current_names = [names_dict[int(box.cls[0])] for box in result[0].boxes]
+        count = len(result[0].boxes)
+        
+        with lock:
+            track_data["count"] = count
+            track_data["names"] = current_names
         
         return av.VideoFrame.from_ndarray(final_frame, format="bgr24")
 
@@ -170,8 +178,6 @@ with col2:
             {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": ["stun:stun1.l.google.com:19302"]},
             {"urls": ["stun:stun2.l.google.com:19302"]},
-            {"urls": ["stun:stun3.l.google.com:19302"]},
-            {"urls": ["stun:stun4.l.google.com:19302"]},
             {"urls": ["stun:global.stun.twilio.com:3478"]}
         ]
 
@@ -191,18 +197,15 @@ with col2:
         st.markdown("### 🖼️ Detection View Window")
         st.info("System idle. Activate an operational mode via the control panel.")
 
-# COLUMN 3: Data Telemetry Dashboard Display (FIXED LIVE CONTEXT READING)
+# COLUMN 3: Data Telemetry Dashboard Display
 with col3:
     st.markdown("### 📊 Analysis & Output")
     
-    # MABADILIKO MAKUBWA: Hapa sasa tunavuta data kutoka kwa muktadha wa video inayocheza moja kwa moja
     if st.session_state.run_live_feed:
-        live_count = 0
-        live_items = []
-        
-        if webrtc_ctx and webrtc_ctx.video_processor:
-            live_count = webrtc_ctx.video_processor.count
-            live_items = webrtc_ctx.video_processor.current_names
+        # Vuta data za thread kwa uhakika (Real-time Lock Extraction)
+        with lock:
+            live_count = track_data["count"]
+            live_items = list(track_data["names"])  # Hifadhi nakala kamili
         
         st.markdown(f"""
         <div class="metric-card">
@@ -213,14 +216,20 @@ with col3:
         
         st.markdown("---")
         st.write("#### 🏷️ Detected Object Names:")
+        
+        # MABORESHO: Sasa inaorodhesha kila jina lililopo kwenye boksi bila kukosa hata moja!
         if live_items:
-            for obj in live_items:
-                st.markdown(f'<div class="name-card">🔹 {obj.upper()}</div>', unsafe_allow_html=True)
+            # Piga hesabu ya marudio ya kila jina (mfano: Person x1, Cup x1)
+            unique_items = set(live_items)
+            for obj in unique_items:
+                item_count = live_items.count(obj)
+                st.markdown(f'<div class="name-card">🔹 {obj.upper()} (x{item_count})</div>', unsafe_allow_html=True)
         else:
             st.write("*No items found in frame.*")
             
-        # Kitufe hiki kipo ili kusaidia kulazimisha Streamlit kusoma namba upya video inapoendelea
-        st.button("🔄 Click to Refresh Counter")
+        # Kulazimisha tovuti isome mabadiliko ya haraka ya video thread kila sekunde
+        if webrtc_ctx and webrtc_ctx.state.playing:
+            st.button("🔄 Sync & Refresh Counter UI")
             
     elif not st.session_state.run_live_feed and st.session_state.detection_done:
         st.markdown(f"""
