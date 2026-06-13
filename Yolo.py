@@ -10,10 +10,6 @@ import threading
 # Page configuration
 st.set_page_config(page_title="AI Object Detector", page_icon="🤖", layout="wide")
 
-# Muundo wa Kushare Data Salama Kati ya Video Thread na Streamlit UI Thread
-lock = threading.Lock()
-track_data = {"count": 0, "names": []}
-
 # Modern and Professional Header Styling
 st.markdown("""
 <div style="
@@ -33,13 +29,10 @@ st.markdown("""
 # Custom CSS for Buttons, Selectboxes, and Output Cards
 st.markdown("""
 <style>
-    /* Styling for Sidebar Selectbox and Inputs */
     div.stSelectbox>div {
         border: 2px solid #2a5298 !important;
         border-radius: 10px !important;
     }
-    
-    /* Custom Styling for the Output Cards */
     .metric-card {
         background-color: #f8f9fa;
         border-left: 5px solid #1e3c72;
@@ -77,13 +70,12 @@ if "run_live_feed" not in st.session_state:
 def load_yolo_model(model_name):
     return YOLO(f"{model_name}.pt")
 
-# Pakia mfano mmoja tu wa model kulingana na chaguo la mtumiaji (RAM Efficiency)
-model = load_yolo_model(model_choice := st.sidebar.selectbox("Choose Model", ["yolov8n", "yolov8s", "yolov8m"]))
-
-# SIDE BAR - CONTROL PANEL #
+# CONTROL PANEL SIDEBAR
 st.sidebar.header("⚙️ Control Panel")
-file_uploaded = st.sidebar.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+model_choice = st.sidebar.selectbox("Choose Model", ["yolov8n", "yolov8s", "yolov8m"])
+model = load_yolo_model(model_choice)
 
+file_uploaded = st.sidebar.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
 confidence = st.sidebar.slider("Confidence Threshold (Lower this for distant objects)", 0, 100, 20)
 max_det = st.sidebar.selectbox("Max Detections", [5, 10, 20])
 
@@ -104,7 +96,6 @@ if stop_cam:
 # Layout Setup
 col1, col2, col3 = st.columns(3, gap="large")
 
-# COLUMN 1: System Instructions / File Details
 with col1:
     st.subheader("📋 Input Details")
     if file_uploaded:
@@ -128,7 +119,6 @@ if file_uploaded and run and not st.session_state.run_live_feed:
     image = Image.open(file_uploaded)
     img_array = np.array(image)
     
-    # Static Image Zoom Pipeline for far object scaling
     h, w = img_array.shape[:2]
     img_resized = cv2.resize(img_array, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC) if w < 1000 else img_array
     
@@ -147,37 +137,35 @@ if file_uploaded and run and not st.session_state.run_live_feed:
     st.session_state.source_type = "Static Image Detection"
     st.session_state.detection_done = True
 
-# COLUMN 2: Display Window (Video or Image Rendering)
+# --- LIVE CAMERA RECV PROCESSOR (IMPROVED CLASS BASED PERSISTENCE) ---
+class YOLOProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.count = 0
+        self.current_names = []
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        
+        h, w = img.shape[:2]
+        scaled_img = cv2.resize(img, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
+        
+        result = model(scaled_img, conf=confidence/100, max_det=max_det)
+        annotated_frame = result[0].plot()
+        
+        final_frame = cv2.resize(annotated_frame, (w, h), interpolation=cv2.INTER_AREA)
+        
+        names_dict = result[0].names
+        self.current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
+        self.count = len(result[0].boxes)
+        
+        return av.VideoFrame.from_ndarray(final_frame, format="bgr24")
+
+# COLUMN 2: Display Window
 with col2:
+    webrtc_ctx = None
     if st.session_state.run_live_feed:
         st.markdown("### 🎥 Real-Time Stream")
 
-        # Class-based video processor iliyosafishwa kuzuia app ku-crash au kuchelewa kusoma picha
-        class YOLOProcessor(VideoProcessorBase):
-            def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-                img = frame.to_ndarray(format="bgr24")
-                
-                # Dynamic Frame Scaling Pipeline to enhance far/small objects
-                h, w = img.shape[:2]
-                scaled_img = cv2.resize(img, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
-                
-                result = model(scaled_img, conf=confidence/100, max_det=max_det)
-                annotated_frame = result[0].plot()
-                
-                final_frame = cv2.resize(annotated_frame, (w, h), interpolation=cv2.INTER_AREA)
-                
-                names_dict = result[0].names
-                current_names = list(set([names_dict[int(box.cls[0])] for box in result[0].boxes]))
-                count = len(result[0].boxes)
-                
-                # Hifadhi taarifa kwa usalama kwenye lock ili UI isisababishe kosa la ufungaji (race condition)
-                with lock:
-                    track_data["count"] = count
-                    track_data["names"] = current_names
-                
-                return av.VideoFrame.from_ndarray(final_frame, format="bgr24")
-
-        # Robust multi-server STUN/TURN configurations to bypass firewalls
         ice_servers_config = [
             {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": ["stun:stun1.l.google.com:19302"]},
@@ -203,15 +191,18 @@ with col2:
         st.markdown("### 🖼️ Detection View Window")
         st.info("System idle. Activate an operational mode via the control panel.")
 
-# COLUMN 3: Data Telemetry Dashboard Display (Static & Live support)
+# COLUMN 3: Data Telemetry Dashboard Display (FIXED LIVE CONTEXT READING)
 with col3:
     st.markdown("### 📊 Analysis & Output")
     
+    # MABADILIKO MAKUBWA: Hapa sasa tunavuta data kutoka kwa muktadha wa video inayocheza moja kwa moja
     if st.session_state.run_live_feed:
-        # Soma data kutoka kwenye uzi wa video (Thread-safe block)
-        with lock:
-            live_count = track_data["count"]
-            live_items = track_data["names"]
+        live_count = 0
+        live_items = []
+        
+        if webrtc_ctx and webrtc_ctx.video_processor:
+            live_count = webrtc_ctx.video_processor.count
+            live_items = webrtc_ctx.video_processor.current_names
         
         st.markdown(f"""
         <div class="metric-card">
@@ -228,9 +219,8 @@ with col3:
         else:
             st.write("*No items found in frame.*")
             
-        # Ongeza kitufe kidogo cha ku-refresh data za Live camera upande wa UI
-        if webrtc_ctx and webrtc_ctx.state.playing:
-            st.button("🔄 Refresh Data Summary")
+        # Kitufe hiki kipo ili kusaidia kulazimisha Streamlit kusoma namba upya video inapoendelea
+        st.button("🔄 Click to Refresh Counter")
             
     elif not st.session_state.run_live_feed and st.session_state.detection_done:
         st.markdown(f"""
